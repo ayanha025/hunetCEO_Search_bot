@@ -216,7 +216,7 @@ def format_article_blocks(articles: list, date_str: str, citations: list = None)
         {"type": "divider"},
     ]
     for i, a in enumerate(articles, 1):
-        src = f"<{a['sourceUrl']}|{a['source']}>" if a.get("sourceUrl") else f"{a['source']} (링크 미확인)"
+        src = f"<{a['sourceUrl']}|{a.get('source', '출처')}>" if a.get("sourceUrl") else f"{a.get('source', '출처 없음')} (링크 미확인)"
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
             "text": f"*{i}. [{a.get('category', '-')}] {a['title']}*\n{a.get('description', '')[:200]}\n🔗 출처: {src}"}})
     if citations:
@@ -253,9 +253,9 @@ def format_series_blocks(series: list, date_str: str, citations: list = None) ->
     ]
     for i, s in enumerate(series, 1):
         eps = "\n".join(f"  {ep.get('title', '')}: {ep.get('desc', '')}" for ep in s.get("episodes", []))
-        src = f"<{s['sourceUrl']}|{s['source']}>" if s.get("sourceUrl") else f"{s['source']} (링크 미확인)"
+        src = f"<{s['sourceUrl']}|{s.get('source', '출처')}>" if s.get("sourceUrl") else f"{s.get('source', '출처 없음')} (링크 미확인)"
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
-            "text": f"*{i}. [{s['category']}] {s['seriesTitle']}*\n기획 의도: {s['description'][:100]}\n{eps}\n🔗 출처: {src}"}})
+            "text": f"*{i}. [{s.get('category', '-')}] {s.get('seriesTitle', '')}*\n기획 의도: {s.get('description', '')[:100]}\n{eps}\n🔗 출처: {src}"}})
     if citations:
         links = "\n".join(f"• <{url}|{url}>" for url in citations[:8])
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
