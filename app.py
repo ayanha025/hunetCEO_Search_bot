@@ -1,5 +1,6 @@
 import logging
 import os
+import signal
 import threading
 
 from dotenv import load_dotenv
@@ -14,8 +15,27 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+LOCK_FILE = "/tmp/hunet_ceo_bot.pid"
+
+def _ensure_single_instance():
+    current_pid = os.getpid()
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            if old_pid > 1 and old_pid != current_pid:
+                os.kill(old_pid, signal.SIGTERM)
+                logger.info(f"기존 프로세스(PID {old_pid}) 종료")
+                import time; time.sleep(1)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(current_pid))
+
+_ensure_single_instance()
+
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
-CONFIRMED_PATH = os.getenv("CONFIRMED_ARTICLES_PATH", "data/confirmed_articles.json")
+CONFIRMED_PATH = os.getenv("CONFIRMED_ARTICLES_PATH", "storage/confirmed_articles.json")
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "perplexity/sonar-pro")
 
@@ -51,6 +71,16 @@ def _run_article_search(client, user_id: str) -> None:
         prompt = content_engine.build_article_prompt(all_used, existing_titles)
         raw, citations = content_engine.call_openrouter(prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
         articles = content_engine.parse_articles(raw)
+        valid, invalid = content_engine.filter_valid_urls(articles)
+        if len(valid) < 3 and invalid:
+            extra = [a["keyword"] for a in invalid]
+            retry_prompt = content_engine.build_article_prompt(all_used + extra, existing_titles)
+            retry_raw, retry_citations = content_engine.call_openrouter(retry_prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
+            retry_valid, _ = content_engine.filter_valid_urls(content_engine.parse_articles(retry_raw))
+            valid.extend(retry_valid)
+            if retry_citations:
+                citations = retry_citations
+        articles = valid
     except Exception as e:
         logger.error("소재 서치 오류: %s", e)
         client.chat_update(channel=dm, ts=loading["ts"],
@@ -80,6 +110,16 @@ def _run_series_search(client, user_id: str) -> None:
         prompt = content_engine.build_series_prompt(all_used, existing_titles)
         raw, citations = content_engine.call_openrouter(prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
         series = content_engine.parse_series(raw)
+        valid, invalid = content_engine.filter_valid_urls(series)
+        if len(valid) < 3 and invalid:
+            extra = [s["keyword"] for s in invalid]
+            retry_prompt = content_engine.build_series_prompt(all_used + extra, existing_titles)
+            retry_raw, retry_citations = content_engine.call_openrouter(retry_prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
+            retry_valid, _ = content_engine.filter_valid_urls(content_engine.parse_series(retry_raw))
+            valid.extend(retry_valid)
+            if retry_citations:
+                citations = retry_citations
+        series = valid
     except Exception as e:
         logger.error("시리즈 서치 오류: %s", e)
         client.chat_update(channel=dm, ts=loading["ts"],
@@ -118,6 +158,16 @@ def _do_regenerate_article(client, user_id: str) -> None:
         prompt = content_engine.build_article_prompt(all_used, existing_titles)
         raw, citations = content_engine.call_openrouter(prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
         articles = content_engine.parse_articles(raw)
+        valid, invalid = content_engine.filter_valid_urls(articles)
+        if len(valid) < 3 and invalid:
+            extra = [a["keyword"] for a in invalid]
+            retry_prompt = content_engine.build_article_prompt(all_used + extra, existing_titles)
+            retry_raw, retry_citations = content_engine.call_openrouter(retry_prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
+            retry_valid, _ = content_engine.filter_valid_urls(content_engine.parse_articles(retry_raw))
+            valid.extend(retry_valid)
+            if retry_citations:
+                citations = retry_citations
+        articles = valid
     except Exception as e:
         logger.error("소재 재생성 오류: %s", e)
         client.chat_postMessage(channel=dm,
@@ -151,6 +201,16 @@ def _do_regenerate_series(client, user_id: str) -> None:
         prompt = content_engine.build_series_prompt(all_used, existing_titles)
         raw, citations = content_engine.call_openrouter(prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
         series = content_engine.parse_series(raw)
+        valid, invalid = content_engine.filter_valid_urls(series)
+        if len(valid) < 3 and invalid:
+            extra = [s["keyword"] for s in invalid]
+            retry_prompt = content_engine.build_series_prompt(all_used + extra, existing_titles)
+            retry_raw, retry_citations = content_engine.call_openrouter(retry_prompt, OPENROUTER_API_KEY, OPENROUTER_MODEL)
+            retry_valid, _ = content_engine.filter_valid_urls(content_engine.parse_series(retry_raw))
+            valid.extend(retry_valid)
+            if retry_citations:
+                citations = retry_citations
+        series = valid
     except Exception as e:
         logger.error("시리즈 재생성 오류: %s", e)
         client.chat_postMessage(channel=dm,
@@ -238,6 +298,10 @@ def handle_confirm_article(ack, body, client):
         client.chat_postMessage(channel=_open_dm(client, user_id),
                                 text="확정할 소재를 먼저 선택해주세요.")
         return
+    if idx >= len(sess["articles"]):
+        client.chat_postMessage(channel=_open_dm(client, user_id),
+                                text="소재 목록이 변경되었습니다. 다시 선택해주세요.")
+        return
     item = {**sess["articles"][idx], "type": "article"}
     storage.append_confirmed(item, CONFIRMED_PATH)
     src = f"<{item['sourceUrl']}|{item['source']}>" if item.get("sourceUrl") else item.get("source", "")
@@ -276,6 +340,10 @@ def handle_confirm_series(ack, body, client):
     if idx is None:
         client.chat_postMessage(channel=_open_dm(client, user_id),
                                 text="확정할 시리즈를 먼저 선택해주세요.")
+        return
+    if idx >= len(sess["series"]):
+        client.chat_postMessage(channel=_open_dm(client, user_id),
+                                text="시리즈 목록이 변경되었습니다. 다시 선택해주세요.")
         return
     item = {**sess["series"][idx], "type": "series"}
     storage.append_confirmed(item, CONFIRMED_PATH)
