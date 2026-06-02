@@ -132,19 +132,48 @@ def build_series_prompt(used_keywords: list, existing_titles: list = None) -> st
     )
 
 
+_FALLBACK_MODELS = [
+    "perplexity/sonar",
+    "perplexity/sonar-reasoning",
+    "openai/gpt-4o-search-preview",
+]
+
+
 def call_openrouter(prompt: str, api_key: str, model: str) -> tuple:
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-        timeout=90,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"OpenRouter API 오류: {resp.status_code} {resp.text}")
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"]
-    citations = data.get("citations", [])
-    return content, citations
+    models = [model] + _FALLBACK_MODELS
+    last_error = None
+    for m in models:
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": m, "messages": [{"role": "user", "content": prompt}]},
+                timeout=90,
+            )
+            if resp.status_code == 429:
+                import time, logging
+                logging.getLogger(__name__).warning("모델 %s 요청 한도 초과, 20초 대기...", m)
+                time.sleep(20)
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": m, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=90,
+                )
+            if resp.status_code != 200:
+                import logging
+                logging.getLogger(__name__).warning("모델 %s HTTP %s, 다음 모델 시도...", m, resp.status_code)
+                last_error = RuntimeError(f"OpenRouter API 오류: {resp.status_code} {resp.text}")
+                continue
+            data = resp.json()
+            import logging
+            logging.getLogger(__name__).info("OpenRouter 모델 사용: %s", m)
+            return data["choices"][0]["message"]["content"], data.get("citations", [])
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("모델 %s 실패 (%s), 다음 모델 시도...", m, e)
+            last_error = e
+    raise RuntimeError(f"모든 모델 실패: {last_error}")
 
 
 def _extract_json(raw: str) -> str:
